@@ -22,28 +22,95 @@ class AutoSendMSG(QObject):
     ReturnError = pyqtSignal(str)
     returnWarning = pyqtSignal(str)
 
-    def __init__(self, isdebug):
+    def __init__(self, isdebug, Frash_sp_input):
         super().__init__()
         self.isdebug = isdebug
+        self.Frash_sp_input = int(Frash_sp_input)*60
 
     def run(self):
         try:
-            Manage, Login_ID, Login_PW = self.get_data()
-            df, driver = self.find_RV(Login_ID, Login_PW)
-            sort_df = self.sort_data(df)
-            self.send_MSG(sort_df, Manage)
-            # output_dir = "./output"
-            # if not os.path.exists(output_dir):
-            #     os.makedirs(output_dir)
+            if self.isdebug:
+                debugpy.debug_this_thread()
+            driver1 = self.send_MSG1()
+            Manage, Login_ID, Login_PW, last_rv_num = self.get_data()
+            df, driver = self.find_RV(Login_ID, Login_PW, last_rv_num)
+            self.send_MSG2(Manage,driver1,df)
 
-            # output_file = os.path.join(output_dir, f"추출물(test)_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx")
+            while True:
+                self.find_RV_re(driver)
+                self.send_MSG2(Manage,driver1,df)
+                time.sleep(self.Frash_sp_input)
 
-            # with pd.ExcelWriter(output_file, engine='openpyxl', mode='w') as writer:
-            #     df.to_excel(writer, index=False)
         except Exception as e:
             self.ReturnError.emit(f'Main FLOW ERR : {str(e)}')
 
-    def send_MSG(self,df_filtered, Manage):
+    def find_RV_re(self, driver):
+        page = 1
+        reservation_list = []
+        today = datetime.datetime.today()
+        file_path = './lastRV_num.txt'
+        with open(file_path, 'r') as file:
+            last_rv_num = file.read().strip()
+        while True:
+            url = f'https://partner.spacecloud.kr/reservation?page={page}'
+            driver.get(url)
+            
+            # 페이지 로딩 대기
+            time.sleep(5)
+            
+            articles = driver.find_elements(By.CLASS_NAME, "list_box")
+            if not articles:
+                break
+            RVnum_element = articles[0].find_element(By.CLASS_NAME, "reservation_num")
+            RVnum_name = RVnum_element.text.strip()
+            RVnum_name = RVnum_name[5:]
+            file_path = './lastRV_num.txt'
+            if int(RVnum_name) > int(last_rv_num):
+                with open(file_path, 'w') as file:
+                    file.write(str(RVnum_name))
+            elif int(RVnum_name) == int(last_rv_num):
+                df = pd.DataFrame(reservation_list)
+                return df, driver
+            for article in articles:
+                try:
+                    RVnum_element = article.find_element(By.CLASS_NAME, "reservation_num")
+                    RVnum_name = RVnum_element.text.strip()
+                    RVnum_name = RVnum_name[5:]
+
+                    if int(RVnum_name) > int(last_rv_num):
+                        place_element = article.find_element(By.CSS_SELECTOR, "dd.place")
+                        place_name = place_element.text.strip()
+                        
+                        date_element = article.find_element(By.CSS_SELECTOR, "dd.date > span.blind")
+                        date_text = date_element.find_element(By.XPATH, "..").text.strip()
+                        date_str = date_text.split(" ")[0]  # '2024.08.05' 부분만 추출
+                        date_str = date_str[:10]  # '2024.09.01' 부분만 추출
+                        date_obj = datetime.datetime.strptime(date_str, "%Y.%m.%d")
+
+                        # 날짜가 오늘 이전이면 루프 종료
+                        if date_obj < today:
+                            df = pd.DataFrame(reservation_list)
+                            return df, driver
+                        
+                        user_element = article.find_element(By.CSS_SELECTOR, "dd.sub_detail > p.user > span.blind")
+                        user_name = user_element.find_element(By.XPATH, "..").text.strip()
+                        
+                        phone_element = article.find_element(By.CSS_SELECTOR, "dd.sub_detail > p.tel > span.blind")
+                        phone_number = phone_element.find_element(By.XPATH, "..").text.strip()
+                        
+                        reservation_list.append({
+                            "Reservation_num" : RVnum_name,
+                            "Place Name": place_name,
+                            "User Name": user_name,
+                            "Phone Number": phone_number,
+                            "Date/Time": date_text
+                        })
+                except Exception as e:
+                    print(f"Error while processing article: {e}")
+            
+            page += 1
+
+    def send_MSG1(self):
         for process in psutil.process_iter():
                 if process.name() == "chromedriver.exe":
                     process.kill()
@@ -57,6 +124,14 @@ class AutoSendMSG(QObject):
         driver = webdriver.Chrome(service=service, options=options)
         page = 1
         # 웹 페이지 열기
+        url = f'https://messages.google.com/web/conversations'
+        driver.get(url)
+        start_chat_button = WebDriverWait(driver, 60).until(
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'fab-label') and contains(text(), '채팅 시작')]"))
+                )
+        return driver
+
+    def send_MSG2(self, Manage, driver, df_filtered):
         url = f'https://messages.google.com/web/conversations'
         driver.get(url)
         try:
@@ -123,14 +198,14 @@ class AutoSendMSG(QObject):
                     time.sleep(0.5)
 
                 # 또는 wait_until_passes를 사용하여 특정 시간 동안 버튼을 클릭 시도
-                wait_until_passes(10, 0.5, click_open_button)
+                wait_until_passes(5, 0.5, click_open_button)
 
                 time.sleep(3) 
                 pyautogui.press('enter')
                 with open('./Sendlist.txt', 'a') as file:
                     file.write(phone_number + '\n')
 
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 with open('./history.txt', 'a') as file:
                     file.write(f'{current_time} - {phone_number}_{space_name}\n')
 
@@ -154,18 +229,17 @@ class AutoSendMSG(QObject):
             admin_data = json.load(file)
             ID = admin_data['id']
             PW = admin_data['pw']
-        
-        return Manage, ID, PW
 
-    def find_RV(self,Login_ID, Login_PW):
-        for process in psutil.process_iter():
-                if process.name() == "chromedriver.exe":
-                    process.kill()
-                    
-        driver_path = ChromeDriverManager().install()
+        file_path = './lastRV_num.txt'
+        with open(file_path, 'r') as file:
+            last_rv_num = file.read().strip()
         
+        return Manage, ID, PW, last_rv_num
+
+    def find_RV(self,Login_ID, Login_PW, last_rv_num):
+        driver_path = ChromeDriverManager().install()
         options = webdriver.ChromeOptions()
-        options.binary_location = r".\Chrome\Application\chrome.exe"
+        options.binary_location = r".\Chrome2\Application\chrome.exe"
         options.add_argument("--disable-blink-features=AutomationControlled")
         service = Service(driver_path, log_path="chromedriver.log")
         driver = webdriver.Chrome(service=service, options=options)
@@ -194,7 +268,7 @@ class AutoSendMSG(QObject):
         today = datetime.datetime.today()
         
         while True:
-            url = f'https://partner.spacecloud.kr/reservation?page={page}&sort_by=reservation_start_date'
+            url = f'https://partner.spacecloud.kr/reservation?page={page}'
             driver.get(url)
             
             # 페이지 로딩 대기
@@ -203,42 +277,54 @@ class AutoSendMSG(QObject):
             articles = driver.find_elements(By.CLASS_NAME, "list_box")
             if not articles:
                 break
-            
+            RVnum_element = articles[0].find_element(By.CLASS_NAME, "reservation_num")
+            RVnum_name = RVnum_element.text.strip()
+            RVnum_name = RVnum_name[5:]
+            file_path = './lastRV_num.txt'
+            if int(RVnum_name) < int(last_rv_num):
+                with open(file_path, 'w') as file:
+                    file.write(str(RVnum_name))
+            elif int(RVnum_name) <= int(last_rv_num):
+                df = pd.DataFrame(reservation_list)
+                return df, driver
             for article in articles:
                 try:
-                    place_element = article.find_element(By.CSS_SELECTOR, "dd.place")
-                    place_name = place_element.text.strip()
-                    
-                    date_element = article.find_element(By.CSS_SELECTOR, "dd.date > span.blind")
-                    date_text = date_element.find_element(By.XPATH, "..").text.strip()
-                    date_str = date_text.split(" ")[0]  # '2024.08.05' 부분만 추출
-                    date_str = date_str[:10]  # '2024.09.01' 부분만 추출
-                    date_obj = datetime.datetime.strptime(date_str, "%Y.%m.%d")
+                    RVnum_element = article.find_element(By.CLASS_NAME, "reservation_num")
+                    RVnum_name = RVnum_element.text.strip()
+                    RVnum_name = RVnum_name[5:]
 
-                    # 날짜가 오늘 이전이면 루프 종료
-                    if date_obj < today:
-                        driver.quit()
-                        df = pd.DataFrame(reservation_list)
-                        return df, driver
-                    
-                    user_element = article.find_element(By.CSS_SELECTOR, "dd.sub_detail > p.user > span.blind")
-                    user_name = user_element.find_element(By.XPATH, "..").text.strip()
-                    
-                    phone_element = article.find_element(By.CSS_SELECTOR, "dd.sub_detail > p.tel > span.blind")
-                    phone_number = phone_element.find_element(By.XPATH, "..").text.strip()
-                    
-                    reservation_list.append({
-                        "Place Name": place_name,
-                        "User Name": user_name,
-                        "Phone Number": phone_number,
-                        "Date/Time": date_text
-                    })
+                    if int(RVnum_name) > int(last_rv_num):
+                        place_element = article.find_element(By.CSS_SELECTOR, "dd.place")
+                        place_name = place_element.text.strip()
+                        
+                        date_element = article.find_element(By.CSS_SELECTOR, "dd.date > span.blind")
+                        date_text = date_element.find_element(By.XPATH, "..").text.strip()
+                        date_str = date_text.split(" ")[0]  # '2024.08.05' 부분만 추출
+                        date_str = date_str[:10]  # '2024.09.01' 부분만 추출
+                        date_obj = datetime.datetime.strptime(date_str, "%Y.%m.%d")
+
+                        # 날짜가 오늘 이전이면 루프 종료
+                        if date_obj < today:
+                            df = pd.DataFrame(reservation_list)
+                            return df, driver
+                        
+                        user_element = article.find_element(By.CSS_SELECTOR, "dd.sub_detail > p.user > span.blind")
+                        user_name = user_element.find_element(By.XPATH, "..").text.strip()
+                        
+                        phone_element = article.find_element(By.CSS_SELECTOR, "dd.sub_detail > p.tel > span.blind")
+                        phone_number = phone_element.find_element(By.XPATH, "..").text.strip()
+                        
+                        reservation_list.append({
+                            "Reservation_num" : RVnum_name,
+                            "Place Name": place_name,
+                            "User Name": user_name,
+                            "Phone Number": phone_number,
+                            "Date/Time": date_text
+                        })
                 except Exception as e:
                     print(f"Error while processing article: {e}")
             
             page += 1
-
-        driver.quit()
         # DataFrame 생성
         df = pd.DataFrame(reservation_list)
         return df, driver
